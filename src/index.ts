@@ -75,7 +75,13 @@ import {
     CoordinateData,
     ParagraphMetadata,
     TextMetadata,
-    NoteMetadata
+    NoteMetadata,
+    CommentBlock,
+    InsertionBlock,
+    DeletionBlock,
+    CommentMetadata,
+    TrackedChangeMetadata,
+    CommentReply
 } from './types';
 
 const parseOffice = OfficeParser.parseOffice;
@@ -111,7 +117,13 @@ export {
     CoordinateData,
     ParagraphMetadata,
     TextMetadata,
-    NoteMetadata
+    NoteMetadata,
+    CommentBlock,
+    InsertionBlock,
+    DeletionBlock,
+    CommentMetadata,
+    TrackedChangeMetadata,
+    CommentReply
 };
 
 
