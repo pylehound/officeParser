@@ -41,6 +41,7 @@ import { parsePdf } from './parsers/PdfParser';
 import { parsePowerPoint } from './parsers/PowerPointParser';
 import { parseRtf } from './parsers/RtfParser';
 import { parseWord } from './parsers/WordParser';
+import { parseDoc } from './parsers/DocParser';
 import { OfficeParserAST, OfficeParserConfig } from './types';
 import { getOfficeError, getWrappedError, OfficeErrorType } from './utils/errorUtils';
 
@@ -117,6 +118,8 @@ export class OfficeParser {
             ocrLanguage: 'eng',
             includeRawContent: false,
             pdfWorkerSrc: '',
+            ignoreComments: false,
+            ignoreTrackedChanges: false,
             ...actualConfig
         };
 
@@ -160,6 +163,9 @@ export class OfficeParser {
             switch (ext) {
                 case 'docx':
                     result = await parseWord(buffer, internalConfig);
+                    break;
+                case 'doc':
+                    result = await parseDoc(buffer, internalConfig);
                     break;
                 case 'pptx':
                     result = await parsePowerPoint(buffer, internalConfig);

@@ -59,15 +59,25 @@ export interface OfficeParserConfig {
      * You can override this with your own local path or a different CDN link.
      */
     pdfWorkerSrc?: string;
+    /**
+     * Flag to ignore comments from parsing in Word documents.
+     * Default is false. Comments are included in the parsed output by default.
+     */
+    ignoreComments?: boolean;
+    /**
+     * Flag to ignore tracked changes (insertions and deletions) from parsing in Word documents.
+     * Default is false. Tracked changes are included in the parsed output by default.
+     */
+    ignoreTrackedChanges?: boolean;
 }
 /**
  * Supported file types for parsing.
  */
-export type SupportedFileType = 'docx' | 'pptx' | 'xlsx' | 'odt' | 'odp' | 'ods' | 'pdf' | 'rtf';
+export type SupportedFileType = 'docx' | 'doc' | 'pptx' | 'xlsx' | 'odt' | 'odp' | 'ods' | 'pdf' | 'rtf';
 /**
  * Types of content nodes in the AST.
  */
-export type OfficeContentNodeType = 'paragraph' | 'heading' | 'table' | 'list' | 'text' | 'image' | 'chart' | 'drawing' | 'slide' | 'note' | 'sheet' | 'row' | 'cell' | 'page';
+export type OfficeContentNodeType = 'paragraph' | 'heading' | 'table' | 'list' | 'text' | 'image' | 'chart' | 'drawing' | 'slide' | 'note' | 'sheet' | 'row' | 'cell' | 'page' | 'comment' | 'insertion' | 'deletion';
 /**
  * Supported MIME types for attachments.
  */
@@ -331,9 +341,42 @@ export interface NoteMetadata {
     noteId?: string;
 }
 /**
+ * A single reply within a comment thread.
+ */
+export interface CommentReply {
+    /** Text content of the reply. */
+    text: string;
+    /** Author of the reply. */
+    author?: string;
+    /** ISO 8601 date string when the reply was made. */
+    date?: string;
+}
+/**
+ * Metadata for comment nodes extracted from Word documents.
+ */
+export interface CommentMetadata {
+    /** Author who made the comment. */
+    author?: string;
+    /** ISO 8601 date string when the comment was made. */
+    date?: string;
+    /** The document text the comment is anchored to. */
+    anchorText?: string;
+    /** Threaded replies to this comment. */
+    replies?: CommentReply[];
+}
+/**
+ * Metadata for tracked-change nodes (insertions and deletions).
+ */
+export interface TrackedChangeMetadata {
+    /** Author who made the change. */
+    author?: string;
+    /** ISO 8601 date string when the change was made. */
+    date?: string;
+}
+/**
  * Union type for content metadata.
  */
-export type ContentMetadata = SlideMetadata | SheetMetadata | HeadingMetadata | ListMetadata | CellMetadata | ImageMetadata | ChartMetadata | PageMetadata | ParagraphMetadata | TextMetadata | NoteMetadata | undefined;
+export type ContentMetadata = SlideMetadata | SheetMetadata | HeadingMetadata | ListMetadata | CellMetadata | ImageMetadata | ChartMetadata | PageMetadata | ParagraphMetadata | TextMetadata | NoteMetadata | CommentMetadata | TrackedChangeMetadata | undefined;
 /**
  * Represents a node in the document content tree.
  * This is the core building block of the parsed document structure.
@@ -508,9 +551,50 @@ export interface ChartBlock {
     position?: CoordinateData;
 }
 /**
+ * Comment block extracted from a Word document.
+ * Emitted inline at the paragraph where the comment is anchored.
+ */
+export interface CommentBlock {
+    type: 'comment';
+    /** Text content of the comment. */
+    text: string;
+    /** Author who made the comment. */
+    author?: string;
+    /** ISO 8601 date string when the comment was made. */
+    date?: string;
+    /** The document text the comment is anchored to. */
+    anchorText?: string;
+    /** Threaded replies to this comment. */
+    replies?: CommentReply[];
+}
+/**
+ * Tracked insertion block extracted from a Word document.
+ */
+export interface InsertionBlock {
+    type: 'insertion';
+    /** The inserted text. */
+    text: string;
+    /** Author who made the insertion. */
+    author?: string;
+    /** ISO 8601 date string when the insertion was made. */
+    date?: string;
+}
+/**
+ * Tracked deletion block extracted from a Word document.
+ */
+export interface DeletionBlock {
+    type: 'deletion';
+    /** The deleted text. */
+    text: string;
+    /** Author who made the deletion. */
+    author?: string;
+    /** ISO 8601 date string when the deletion was made. */
+    date?: string;
+}
+/**
  * Union type of all block types.
  */
-export type Block = TextBlock | ImageBlock | TableBlock | ChartBlock;
+export type Block = TextBlock | ImageBlock | TableBlock | ChartBlock | CommentBlock | InsertionBlock | DeletionBlock;
 /**
  * Represents an attachment extracted from the document (image, chart, etc.).
  * Attachments are binary resources embedded in the document.

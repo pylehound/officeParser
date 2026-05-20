@@ -66,6 +66,7 @@ const PdfParser_1 = require("./parsers/PdfParser");
 const PowerPointParser_1 = require("./parsers/PowerPointParser");
 const RtfParser_1 = require("./parsers/RtfParser");
 const WordParser_1 = require("./parsers/WordParser");
+const DocParser_1 = require("./parsers/DocParser");
 const errorUtils_1 = require("./utils/errorUtils");
 /**
  * Main parser class providing office document parsing functionality.
@@ -139,6 +140,8 @@ class OfficeParser {
             ocrLanguage: 'eng',
             includeRawContent: false,
             pdfWorkerSrc: '',
+            ignoreComments: false,
+            ignoreTrackedChanges: false,
             ...actualConfig
         };
         let buffer = Buffer.alloc(0);
@@ -181,6 +184,9 @@ class OfficeParser {
             switch (ext) {
                 case 'docx':
                     result = await (0, WordParser_1.parseWord)(buffer, internalConfig);
+                    break;
+                case 'doc':
+                    result = await (0, DocParser_1.parseDoc)(buffer, internalConfig);
                     break;
                 case 'pptx':
                     result = await (0, PowerPointParser_1.parsePowerPoint)(buffer, internalConfig);

@@ -92,6 +92,7 @@ const parseWord = async (buffer, config) => {
     const corePropsFileRegex = /docProps\/core[\d+]?.xml/;
     const relsFileRegex = /word\/_rels\/document[\d+]?.xml\.rels/;
     const stylesFileRegex = /word\/styles[\d+]?.xml/;
+    const commentsFileRegex = /word\/comments[\d+]?.xml/;
     const xmlSerializer = new xmldom_1.XMLSerializer();
     // Pre-compiled regexes for run-property boolean tags (used in hot path)
     const REGEX_W_B = /<w:b(?:\s+w:val="([^"]+)")?\s*\/?>/;
@@ -183,6 +184,7 @@ const parseWord = async (buffer, config) => {
         !!x.match(corePropsFileRegex) ||
         !!x.match(relsFileRegex) ||
         !!x.match(stylesFileRegex) ||
+        !!x.match(commentsFileRegex) ||
         (!!config.extractAttachments && !!x.match(mediaFileRegex)));
     let corePropsFile;
     let relsFile;
@@ -190,6 +192,7 @@ const parseWord = async (buffer, config) => {
     let stylesFile;
     let footnotesFile;
     let endnotesFile;
+    let commentsFile;
     for (const f of files) {
         if (f.path.match(corePropsFileRegex))
             corePropsFile = f;
@@ -203,6 +206,8 @@ const parseWord = async (buffer, config) => {
             footnotesFile = f;
         else if (f.path.match(endnotesFileRegex))
             endnotesFile = f;
+        else if (f.path.match(commentsFileRegex))
+            commentsFile = f;
     }
     // Extract metadata
     const metadata = corePropsFile ? (0, xmlUtils_1.parseOfficeMetadata)(corePropsFile.content.toString()) : {};
@@ -311,12 +316,68 @@ const parseWord = async (buffer, config) => {
             defaultParaStyleId = "Normal";
         }
     }
+    const structuredCommentMap = new Map();
+    if (commentsFile && !config.ignoreComments) {
+        const commentsDoc = (0, xmlUtils_1.parseXmlString)(commentsFile.content.toString());
+        const commentNodes = (0, xmlUtils_1.getElementsByTagName)(commentsDoc, "w:comment");
+        const rawComments = [];
+        const paraIdToCommentId = new Map();
+        for (const commentNode of commentNodes) {
+            const id = commentNode.getAttribute("w:id");
+            if (!id)
+                continue;
+            const author = commentNode.getAttribute("w:author") ?? undefined;
+            const date = commentNode.getAttribute("w:date") ?? undefined;
+            const pNodes = (0, xmlUtils_1.getElementsByTagName)(commentNode, "w:p");
+            const firstPara = pNodes[0];
+            // w14:paraId and w14:paraIdParent use the w14 namespace
+            const firstParaId = firstPara?.getAttribute("w14:paraId") ?? undefined;
+            const parentParaId = firstPara?.getAttribute("w14:paraIdParent") ?? undefined;
+            const text = pNodes
+                .map(p => (0, xmlUtils_1.getElementsByTagName)(p, "w:t").map(t => t.textContent ?? '').join(''))
+                .filter(t => t)
+                .join('\n');
+            rawComments.push({ id, author, date, text, firstParaId, parentParaId });
+            if (firstParaId)
+                paraIdToCommentId.set(firstParaId, id);
+        }
+        // Build top-level comments first
+        for (const raw of rawComments) {
+            if (!raw.parentParaId) {
+                structuredCommentMap.set(raw.id, {
+                    id: raw.id, author: raw.author, date: raw.date, text: raw.text, replies: []
+                });
+            }
+        }
+        // Attach replies to their parent comment
+        for (const raw of rawComments) {
+            if (raw.parentParaId) {
+                const parentId = paraIdToCommentId.get(raw.parentParaId);
+                if (parentId) {
+                    const parent = structuredCommentMap.get(parentId);
+                    if (parent) {
+                        parent.replies.push({ text: raw.text, author: raw.author, date: raw.date });
+                    }
+                }
+                else {
+                    // Parent not found — treat as top-level
+                    structuredCommentMap.set(raw.id, {
+                        id: raw.id, author: raw.author, date: raw.date, text: raw.text, replies: []
+                    });
+                }
+            }
+        }
+    }
+    // Tracks which comment IDs were referenced in the current paragraph (populated during parseParagraph)
+    let pendingCommentRefs = [];
+    // Anchor text accumulated between commentRangeStart and commentRangeEnd
+    const commentAnchorAccum = new Map();
     const content = [];
     const rawContents = [];
     const numberingState = {};
     const listCounters = {}; // Track item index per listId/level
     // Helper to parse a paragraph node
-    const parseParagraph = (pNode) => {
+    const parseParagraph = (pNode, isNoteContext = false) => {
         const pXml = xmlSerializer.serializeToString(pNode);
         // Check if it's a list item
         const numPr = (0, xmlUtils_1.getElementsByTagName)(pNode, "w:numPr")[0];
@@ -370,9 +431,63 @@ const parseWord = async (buffer, config) => {
         // Extract text and children
         let text = '';
         const children = [];
+        // Track open comment ranges for anchor text accumulation (keyed by comment ID)
+        const activeCommentRanges = new Set();
+        // Collect comment references encountered in this paragraph (only if not in a note context,
+        // to avoid emitting comment nodes inside footnote/endnote sub-trees)
+        if (!isNoteContext)
+            pendingCommentRefs = [];
         // Traverse children of paragraph (runs, hyperlinks, etc.)
         const processChildNode = (node) => {
-            if (node.nodeName === 'w:r') {
+            if (node.nodeName === 'w:commentRangeStart' && !config.ignoreComments) {
+                const id = node.getAttribute('w:id');
+                if (id) {
+                    activeCommentRanges.add(id);
+                    if (!commentAnchorAccum.has(id))
+                        commentAnchorAccum.set(id, '');
+                }
+            }
+            else if (node.nodeName === 'w:commentRangeEnd' && !config.ignoreComments) {
+                const id = node.getAttribute('w:id');
+                if (id)
+                    activeCommentRanges.delete(id);
+            }
+            else if (node.nodeName === 'w:ins' && !config.ignoreTrackedChanges) {
+                const insNode = node;
+                const author = insNode.getAttribute('w:author') ?? undefined;
+                const date = insNode.getAttribute('w:date') ?? undefined;
+                const runs = (0, xmlUtils_1.getElementsByTagName)(insNode, 'w:t');
+                const insertedText = runs.map(r => r.textContent ?? '').join('');
+                if (insertedText) {
+                    text += insertedText;
+                    for (const id of activeCommentRanges) {
+                        commentAnchorAccum.set(id, (commentAnchorAccum.get(id) ?? '') + insertedText);
+                    }
+                    const insNode2 = {
+                        type: 'insertion',
+                        text: insertedText,
+                        metadata: { author, date }
+                    };
+                    children.push(insNode2);
+                }
+            }
+            else if (node.nodeName === 'w:del' && !config.ignoreTrackedChanges) {
+                const delNode = node;
+                const author = delNode.getAttribute('w:author') ?? undefined;
+                const date = delNode.getAttribute('w:date') ?? undefined;
+                // Deleted text uses w:delText, not w:t
+                const runs = (0, xmlUtils_1.getElementsByTagName)(delNode, 'w:delText');
+                const deletedText = runs.map(r => r.textContent ?? '').join('');
+                if (deletedText) {
+                    const delContentNode = {
+                        type: 'deletion',
+                        text: deletedText,
+                        metadata: { author, date }
+                    };
+                    children.push(delContentNode);
+                }
+            }
+            else if (node.nodeName === 'w:r') {
                 const runNode = node;
                 const rPr = (0, xmlUtils_1.getElementsByTagName)(runNode, "w:rPr")[0];
                 // Formatting
@@ -411,6 +526,10 @@ const parseWord = async (buffer, config) => {
                 for (const tNode of tNodes) {
                     const tContent = tNode.textContent || '';
                     text += tContent;
+                    // Accumulate anchor text for any open comment ranges
+                    for (const id of activeCommentRanges) {
+                        commentAnchorAccum.set(id, (commentAnchorAccum.get(id) ?? '') + tContent);
+                    }
                     const textNode = {
                         type: 'text',
                         text: tContent,
@@ -426,6 +545,16 @@ const parseWord = async (buffer, config) => {
                         textNode.metadata = { style: nodeStyle };
                     }
                     children.push(textNode);
+                }
+                // Comment references
+                if (!config.ignoreComments && !isNoteContext) {
+                    const commentRef = (0, xmlUtils_1.getElementsByTagName)(runNode, "w:commentReference")[0];
+                    if (commentRef) {
+                        const id = commentRef.getAttribute("w:id");
+                        if (id && structuredCommentMap.has(id)) {
+                            pendingCommentRefs.push(id);
+                        }
+                    }
                 }
                 // Images/Drawings
                 if (config.extractAttachments) {
@@ -694,7 +823,7 @@ const parseWord = async (buffer, config) => {
                 if (!id || id === "-1" || id === "0")
                     continue;
                 const pNodes = (0, xmlUtils_1.getElementsByTagName)(node, "w:p");
-                footnoteMap.set(id, pNodes.map(p => parseParagraph(p)));
+                footnoteMap.set(id, pNodes.map(p => parseParagraph(p, true)));
             }
         }
         if (endnotesFile) {
@@ -705,7 +834,7 @@ const parseWord = async (buffer, config) => {
                 if (!id || id === "-1" || id === "0")
                     continue;
                 const pNodes = (0, xmlUtils_1.getElementsByTagName)(node, "w:p");
-                endnoteMap.set(id, pNodes.map(p => parseParagraph(p)));
+                endnoteMap.set(id, pNodes.map(p => parseParagraph(p, true)));
             }
         }
     }
@@ -722,6 +851,8 @@ const parseWord = async (buffer, config) => {
             continue;
         if (file.path.match(endnotesFileRegex))
             continue;
+        if (file.path.match(commentsFileRegex))
+            continue;
         const documentContent = file.content.toString();
         if (config.includeRawContent) {
             rawContents.push(documentContent);
@@ -733,6 +864,28 @@ const parseWord = async (buffer, config) => {
             for (const child of bodyChildren) {
                 if (child.nodeName === 'w:p') {
                     content.push(parseParagraph(child));
+                    // Emit comment nodes for any comments referenced in this paragraph
+                    if (!config.ignoreComments && pendingCommentRefs.length > 0) {
+                        for (const commentId of pendingCommentRefs) {
+                            const comment = structuredCommentMap.get(commentId);
+                            if (comment) {
+                                const anchorText = commentAnchorAccum.get(commentId);
+                                commentAnchorAccum.delete(commentId);
+                                const commentMeta = {
+                                    author: comment.author,
+                                    date: comment.date,
+                                    anchorText: anchorText ?? undefined,
+                                    replies: comment.replies.length > 0 ? comment.replies : undefined
+                                };
+                                content.push({
+                                    type: 'comment',
+                                    text: comment.text,
+                                    metadata: commentMeta
+                                });
+                            }
+                        }
+                        pendingCommentRefs = [];
+                    }
                 }
                 else if (child.nodeName === 'w:tbl') {
                     content.push(parseTable(child));
@@ -832,6 +985,41 @@ const parseWord = async (buffer, config) => {
     const newline = config.newlineDelimiter ?? '\n';
     const blocks = [];
     const traverseBlocksAndText = (node) => {
+        if (node.type === 'comment') {
+            const meta = node.metadata;
+            const commentBlock = {
+                type: 'comment',
+                text: node.text ?? '',
+                author: meta?.author,
+                date: meta?.date,
+                anchorText: meta?.anchorText,
+                replies: meta?.replies
+            };
+            blocks.push(commentBlock);
+            return '';
+        }
+        if (node.type === 'insertion') {
+            const meta = node.metadata;
+            const insertionBlock = {
+                type: 'insertion',
+                text: node.text ?? '',
+                author: meta?.author,
+                date: meta?.date
+            };
+            blocks.push(insertionBlock);
+            return node.text ?? '';
+        }
+        if (node.type === 'deletion') {
+            const meta = node.metadata;
+            const deletionBlock = {
+                type: 'deletion',
+                text: node.text ?? '',
+                author: meta?.author,
+                date: meta?.date
+            };
+            blocks.push(deletionBlock);
+            return '';
+        }
         if (node.type === 'table') {
             const tableBlock = convertTableToBlock(node);
             blocks.push(tableBlock);

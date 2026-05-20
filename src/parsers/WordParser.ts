@@ -60,7 +60,7 @@
  */
 
 import { XMLSerializer } from '@xmldom/xmldom';
-import { Block, ChartBlock, ChartMetadata, ImageBlock, ImageMetadata, ListMetadata, OfficeAttachment, OfficeContentNode, OfficeParserAST, OfficeParserConfig, TableBlock, TextBlock, TextFormatting, TextMetadata } from '../types';
+import { Block, ChartBlock, ChartMetadata, CommentBlock, CommentMetadata, CommentReply, DeletionBlock, ImageBlock, ImageMetadata, InsertionBlock, ListMetadata, OfficeAttachment, OfficeContentNode, OfficeParserAST, OfficeParserConfig, TableBlock, TextBlock, TextFormatting, TextMetadata, TrackedChangeMetadata } from '../types';
 import { logWarning } from '../utils/errorUtils';
 import { createAttachment } from '../utils/imageUtils';
 import { performOcr } from '../utils/ocrUtils';
@@ -92,6 +92,7 @@ export const parseWord = async (buffer: Buffer, config: OfficeParserConfig): Pro
     const corePropsFileRegex = /docProps\/core[\d+]?.xml/;
     const relsFileRegex = /word\/_rels\/document[\d+]?.xml\.rels/;
     const stylesFileRegex = /word\/styles[\d+]?.xml/;
+    const commentsFileRegex = /word\/comments[\d+]?.xml/;
 
     const xmlSerializer = new XMLSerializer();
 
@@ -187,6 +188,7 @@ export const parseWord = async (buffer: Buffer, config: OfficeParserConfig): Pro
         !!x.match(corePropsFileRegex) ||
         !!x.match(relsFileRegex) ||
         !!x.match(stylesFileRegex) ||
+        !!x.match(commentsFileRegex) ||
         (!!config.extractAttachments && !!x.match(mediaFileRegex))
     );
 
@@ -197,6 +199,7 @@ export const parseWord = async (buffer: Buffer, config: OfficeParserConfig): Pro
     let stylesFile: FileEntry | undefined;
     let footnotesFile: FileEntry | undefined;
     let endnotesFile: FileEntry | undefined;
+    let commentsFile: FileEntry | undefined;
     for (const f of files) {
         if (f.path.match(corePropsFileRegex)) corePropsFile = f;
         else if (f.path.match(relsFileRegex)) relsFile = f;
@@ -204,6 +207,7 @@ export const parseWord = async (buffer: Buffer, config: OfficeParserConfig): Pro
         else if (f.path.match(stylesFileRegex)) stylesFile = f;
         else if (f.path.match(footnotesFileRegex)) footnotesFile = f;
         else if (f.path.match(endnotesFileRegex)) endnotesFile = f;
+        else if (f.path.match(commentsFileRegex)) commentsFile = f;
     }
 
     // Extract metadata
@@ -331,13 +335,94 @@ export const parseWord = async (buffer: Buffer, config: OfficeParserConfig): Pro
 
 
 
+    // Parse comments from word/comments.xml
+    interface StructuredComment {
+        id: string;
+        author?: string;
+        date?: string;
+        text: string;
+        replies: CommentReply[];
+    }
+    const structuredCommentMap = new Map<string, StructuredComment>();
+
+    if (commentsFile && !config.ignoreComments) {
+        const commentsDoc = parseXmlString(commentsFile.content.toString());
+        const commentNodes = getElementsByTagName(commentsDoc, "w:comment");
+
+        interface RawComment {
+            id: string;
+            author?: string;
+            date?: string;
+            text: string;
+            firstParaId?: string;
+            parentParaId?: string;
+        }
+        const rawComments: RawComment[] = [];
+        const paraIdToCommentId = new Map<string, string>();
+
+        for (const commentNode of commentNodes) {
+            const id = commentNode.getAttribute("w:id");
+            if (!id) continue;
+
+            const author = commentNode.getAttribute("w:author") ?? undefined;
+            const date = commentNode.getAttribute("w:date") ?? undefined;
+
+            const pNodes = getElementsByTagName(commentNode, "w:p");
+            const firstPara = pNodes[0];
+
+            // w14:paraId and w14:paraIdParent use the w14 namespace
+            const firstParaId = firstPara?.getAttribute("w14:paraId") ?? undefined;
+            const parentParaId = firstPara?.getAttribute("w14:paraIdParent") ?? undefined;
+
+            const text = pNodes
+                .map(p => getElementsByTagName(p, "w:t").map(t => t.textContent ?? '').join(''))
+                .filter(t => t)
+                .join('\n');
+
+            rawComments.push({ id, author, date, text, firstParaId, parentParaId });
+            if (firstParaId) paraIdToCommentId.set(firstParaId, id);
+        }
+
+        // Build top-level comments first
+        for (const raw of rawComments) {
+            if (!raw.parentParaId) {
+                structuredCommentMap.set(raw.id, {
+                    id: raw.id, author: raw.author, date: raw.date, text: raw.text, replies: []
+                });
+            }
+        }
+
+        // Attach replies to their parent comment
+        for (const raw of rawComments) {
+            if (raw.parentParaId) {
+                const parentId = paraIdToCommentId.get(raw.parentParaId);
+                if (parentId) {
+                    const parent = structuredCommentMap.get(parentId);
+                    if (parent) {
+                        parent.replies.push({ text: raw.text, author: raw.author, date: raw.date });
+                    }
+                } else {
+                    // Parent not found — treat as top-level
+                    structuredCommentMap.set(raw.id, {
+                        id: raw.id, author: raw.author, date: raw.date, text: raw.text, replies: []
+                    });
+                }
+            }
+        }
+    }
+
+    // Tracks which comment IDs were referenced in the current paragraph (populated during parseParagraph)
+    let pendingCommentRefs: string[] = [];
+    // Anchor text accumulated between commentRangeStart and commentRangeEnd
+    const commentAnchorAccum = new Map<string, string>();
+
     const content: OfficeContentNode[] = [];
     const rawContents: string[] = [];
     const numberingState: { [key: string]: { [key: string]: number } } = {};
     const listCounters: { [key: string]: { [key: string]: number } } = {}; // Track item index per listId/level
 
     // Helper to parse a paragraph node
-    const parseParagraph = (pNode: Element): OfficeContentNode => {
+    const parseParagraph = (pNode: Element, isNoteContext = false): OfficeContentNode => {
         const pXml = xmlSerializer.serializeToString(pNode);
 
         // Check if it's a list item
@@ -398,9 +483,58 @@ export const parseWord = async (buffer: Buffer, config: OfficeParserConfig): Pro
         let text = '';
         const children: OfficeContentNode[] = [];
 
+        // Track open comment ranges for anchor text accumulation (keyed by comment ID)
+        const activeCommentRanges = new Set<string>();
+
+        // Collect comment references encountered in this paragraph (only if not in a note context,
+        // to avoid emitting comment nodes inside footnote/endnote sub-trees)
+        if (!isNoteContext) pendingCommentRefs = [];
+
         // Traverse children of paragraph (runs, hyperlinks, etc.)
         const processChildNode = (node: Node) => {
-            if (node.nodeName === 'w:r') {
+            if (node.nodeName === 'w:commentRangeStart' && !config.ignoreComments) {
+                const id = (node as Element).getAttribute('w:id');
+                if (id) {
+                    activeCommentRanges.add(id);
+                    if (!commentAnchorAccum.has(id)) commentAnchorAccum.set(id, '');
+                }
+            } else if (node.nodeName === 'w:commentRangeEnd' && !config.ignoreComments) {
+                const id = (node as Element).getAttribute('w:id');
+                if (id) activeCommentRanges.delete(id);
+            } else if (node.nodeName === 'w:ins' && !config.ignoreTrackedChanges) {
+                const insNode = node as Element;
+                const author = insNode.getAttribute('w:author') ?? undefined;
+                const date = insNode.getAttribute('w:date') ?? undefined;
+                const runs = getElementsByTagName(insNode, 'w:t');
+                const insertedText = runs.map(r => r.textContent ?? '').join('');
+                if (insertedText) {
+                    text += insertedText;
+                    for (const id of activeCommentRanges) {
+                        commentAnchorAccum.set(id, (commentAnchorAccum.get(id) ?? '') + insertedText);
+                    }
+                    const insNode2: OfficeContentNode = {
+                        type: 'insertion',
+                        text: insertedText,
+                        metadata: { author, date } as TrackedChangeMetadata
+                    };
+                    children.push(insNode2);
+                }
+            } else if (node.nodeName === 'w:del' && !config.ignoreTrackedChanges) {
+                const delNode = node as Element;
+                const author = delNode.getAttribute('w:author') ?? undefined;
+                const date = delNode.getAttribute('w:date') ?? undefined;
+                // Deleted text uses w:delText, not w:t
+                const runs = getElementsByTagName(delNode, 'w:delText');
+                const deletedText = runs.map(r => r.textContent ?? '').join('');
+                if (deletedText) {
+                    const delContentNode: OfficeContentNode = {
+                        type: 'deletion',
+                        text: deletedText,
+                        metadata: { author, date } as TrackedChangeMetadata
+                    };
+                    children.push(delContentNode);
+                }
+            } else if (node.nodeName === 'w:r') {
                 const runNode = node as Element;
                 const rPr = getElementsByTagName(runNode, "w:rPr")[0];
 
@@ -443,6 +577,10 @@ export const parseWord = async (buffer: Buffer, config: OfficeParserConfig): Pro
                 for (const tNode of tNodes) {
                     const tContent = tNode.textContent || '';
                     text += tContent;
+                    // Accumulate anchor text for any open comment ranges
+                    for (const id of activeCommentRanges) {
+                        commentAnchorAccum.set(id, (commentAnchorAccum.get(id) ?? '') + tContent);
+                    }
                     const textNode: OfficeContentNode = {
                         type: 'text',
                         text: tContent,
@@ -458,6 +596,17 @@ export const parseWord = async (buffer: Buffer, config: OfficeParserConfig): Pro
                         textNode.metadata = { style: nodeStyle };
                     }
                     children.push(textNode);
+                }
+
+                // Comment references
+                if (!config.ignoreComments && !isNoteContext) {
+                    const commentRef = getElementsByTagName(runNode, "w:commentReference")[0];
+                    if (commentRef) {
+                        const id = commentRef.getAttribute("w:id");
+                        if (id && structuredCommentMap.has(id)) {
+                            pendingCommentRefs.push(id);
+                        }
+                    }
                 }
 
                 // Images/Drawings
@@ -735,7 +884,7 @@ export const parseWord = async (buffer: Buffer, config: OfficeParserConfig): Pro
                 const id = node.getAttribute("w:id");
                 if (!id || id === "-1" || id === "0") continue;
                 const pNodes = getElementsByTagName(node, "w:p");
-                footnoteMap.set(id, pNodes.map(p => parseParagraph(p)));
+                footnoteMap.set(id, pNodes.map(p => parseParagraph(p, true)));
             }
         }
 
@@ -746,7 +895,7 @@ export const parseWord = async (buffer: Buffer, config: OfficeParserConfig): Pro
                 const id = node.getAttribute("w:id");
                 if (!id || id === "-1" || id === "0") continue;
                 const pNodes = getElementsByTagName(node, "w:p");
-                endnoteMap.set(id, pNodes.map(p => parseParagraph(p)));
+                endnoteMap.set(id, pNodes.map(p => parseParagraph(p, true)));
             }
         }
     }
@@ -758,6 +907,7 @@ export const parseWord = async (buffer: Buffer, config: OfficeParserConfig): Pro
         if (file.path.match(stylesFileRegex)) continue;
         if (file.path.match(footnotesFileRegex)) continue;
         if (file.path.match(endnotesFileRegex)) continue;
+        if (file.path.match(commentsFileRegex)) continue;
 
         const documentContent = file.content.toString();
         if (config.includeRawContent) {
@@ -771,6 +921,29 @@ export const parseWord = async (buffer: Buffer, config: OfficeParserConfig): Pro
             for (const child of bodyChildren) {
                 if (child.nodeName === 'w:p') {
                     content.push(parseParagraph(child as Element));
+
+                    // Emit comment nodes for any comments referenced in this paragraph
+                    if (!config.ignoreComments && pendingCommentRefs.length > 0) {
+                        for (const commentId of pendingCommentRefs) {
+                            const comment = structuredCommentMap.get(commentId);
+                            if (comment) {
+                                const anchorText = commentAnchorAccum.get(commentId);
+                                commentAnchorAccum.delete(commentId);
+                                const commentMeta: CommentMetadata = {
+                                    author: comment.author,
+                                    date: comment.date,
+                                    anchorText: anchorText ?? undefined,
+                                    replies: comment.replies.length > 0 ? comment.replies : undefined
+                                };
+                                content.push({
+                                    type: 'comment',
+                                    text: comment.text,
+                                    metadata: commentMeta
+                                });
+                            }
+                        }
+                        pendingCommentRefs = [];
+                    }
                 } else if (child.nodeName === 'w:tbl') {
                     content.push(parseTable(child as Element));
                 }
@@ -884,6 +1057,41 @@ export const parseWord = async (buffer: Buffer, config: OfficeParserConfig): Pro
     const blocks: Block[] = [];
 
     const traverseBlocksAndText = (node: OfficeContentNode): string => {
+        if (node.type === 'comment') {
+            const meta = node.metadata as CommentMetadata | undefined;
+            const commentBlock: CommentBlock = {
+                type: 'comment',
+                text: node.text ?? '',
+                author: meta?.author,
+                date: meta?.date,
+                anchorText: meta?.anchorText,
+                replies: meta?.replies
+            };
+            blocks.push(commentBlock);
+            return '';
+        }
+        if (node.type === 'insertion') {
+            const meta = node.metadata as TrackedChangeMetadata | undefined;
+            const insertionBlock: InsertionBlock = {
+                type: 'insertion',
+                text: node.text ?? '',
+                author: meta?.author,
+                date: meta?.date
+            };
+            blocks.push(insertionBlock);
+            return node.text ?? '';
+        }
+        if (node.type === 'deletion') {
+            const meta = node.metadata as TrackedChangeMetadata | undefined;
+            const deletionBlock: DeletionBlock = {
+                type: 'deletion',
+                text: node.text ?? '',
+                author: meta?.author,
+                date: meta?.date
+            };
+            blocks.push(deletionBlock);
+            return '';
+        }
         if (node.type === 'table') {
             const tableBlock = convertTableToBlock(node);
             blocks.push(tableBlock);
