@@ -413,6 +413,8 @@ export const parseWord = async (buffer: Buffer, config: OfficeParserConfig): Pro
 
     // Tracks which comment IDs were referenced in the current paragraph (populated during parseParagraph)
     let pendingCommentRefs: string[] = [];
+    // Tracked-change nodes collected during paragraph parsing, emitted as top-level content after the paragraph
+    let pendingTrackedChanges: OfficeContentNode[] = [];
     // Anchor text accumulated between commentRangeStart and commentRangeEnd
     const commentAnchorAccum = new Map<string, string>();
 
@@ -486,9 +488,12 @@ export const parseWord = async (buffer: Buffer, config: OfficeParserConfig): Pro
         // Track open comment ranges for anchor text accumulation (keyed by comment ID)
         const activeCommentRanges = new Set<string>();
 
-        // Collect comment references encountered in this paragraph (only if not in a note context,
-        // to avoid emitting comment nodes inside footnote/endnote sub-trees)
-        if (!isNoteContext) pendingCommentRefs = [];
+        // Collect comment references and tracked changes encountered in this paragraph
+        // (only if not in a note context, to avoid emitting extra nodes inside footnotes)
+        if (!isNoteContext) {
+            pendingCommentRefs = [];
+            pendingTrackedChanges = [];
+        }
 
         // Traverse children of paragraph (runs, hyperlinks, etc.)
         const processChildNode = (node: Node) => {
@@ -508,16 +513,19 @@ export const parseWord = async (buffer: Buffer, config: OfficeParserConfig): Pro
                 const runs = getElementsByTagName(insNode, 'w:t');
                 const insertedText = runs.map(r => r.textContent ?? '').join('');
                 if (insertedText) {
+                    // Add to paragraph text so fullText includes accepted insertions
                     text += insertedText;
                     for (const id of activeCommentRanges) {
                         commentAnchorAccum.set(id, (commentAnchorAccum.get(id) ?? '') + insertedText);
                     }
-                    const insNode2: OfficeContentNode = {
-                        type: 'insertion',
-                        text: insertedText,
-                        metadata: { author, date } as TrackedChangeMetadata
-                    };
-                    children.push(insNode2);
+                    // Emit as a top-level node after the paragraph (side-channel, not a child)
+                    if (!isNoteContext) {
+                        pendingTrackedChanges.push({
+                            type: 'insertion',
+                            text: insertedText,
+                            metadata: { author, date } as TrackedChangeMetadata
+                        });
+                    }
                 }
             } else if (node.nodeName === 'w:del' && !config.ignoreTrackedChanges) {
                 const delNode = node as Element;
@@ -526,13 +534,12 @@ export const parseWord = async (buffer: Buffer, config: OfficeParserConfig): Pro
                 // Deleted text uses w:delText, not w:t
                 const runs = getElementsByTagName(delNode, 'w:delText');
                 const deletedText = runs.map(r => r.textContent ?? '').join('');
-                if (deletedText) {
-                    const delContentNode: OfficeContentNode = {
+                if (deletedText && !isNoteContext) {
+                    pendingTrackedChanges.push({
                         type: 'deletion',
                         text: deletedText,
                         metadata: { author, date } as TrackedChangeMetadata
-                    };
-                    children.push(delContentNode);
+                    });
                 }
             } else if (node.nodeName === 'w:r') {
                 const runNode = node as Element;
@@ -921,6 +928,12 @@ export const parseWord = async (buffer: Buffer, config: OfficeParserConfig): Pro
             for (const child of bodyChildren) {
                 if (child.nodeName === 'w:p') {
                     content.push(parseParagraph(child as Element));
+
+                    // Emit tracked-change nodes collected during paragraph parsing
+                    if (!config.ignoreTrackedChanges && pendingTrackedChanges.length > 0) {
+                        content.push(...pendingTrackedChanges);
+                        pendingTrackedChanges = [];
+                    }
 
                     // Emit comment nodes for any comments referenced in this paragraph
                     if (!config.ignoreComments && pendingCommentRefs.length > 0) {

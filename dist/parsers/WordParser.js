@@ -370,6 +370,8 @@ const parseWord = async (buffer, config) => {
     }
     // Tracks which comment IDs were referenced in the current paragraph (populated during parseParagraph)
     let pendingCommentRefs = [];
+    // Tracked-change nodes collected during paragraph parsing, emitted as top-level content after the paragraph
+    let pendingTrackedChanges = [];
     // Anchor text accumulated between commentRangeStart and commentRangeEnd
     const commentAnchorAccum = new Map();
     const content = [];
@@ -433,10 +435,12 @@ const parseWord = async (buffer, config) => {
         const children = [];
         // Track open comment ranges for anchor text accumulation (keyed by comment ID)
         const activeCommentRanges = new Set();
-        // Collect comment references encountered in this paragraph (only if not in a note context,
-        // to avoid emitting comment nodes inside footnote/endnote sub-trees)
-        if (!isNoteContext)
+        // Collect comment references and tracked changes encountered in this paragraph
+        // (only if not in a note context, to avoid emitting extra nodes inside footnotes)
+        if (!isNoteContext) {
             pendingCommentRefs = [];
+            pendingTrackedChanges = [];
+        }
         // Traverse children of paragraph (runs, hyperlinks, etc.)
         const processChildNode = (node) => {
             if (node.nodeName === 'w:commentRangeStart' && !config.ignoreComments) {
@@ -459,16 +463,19 @@ const parseWord = async (buffer, config) => {
                 const runs = (0, xmlUtils_1.getElementsByTagName)(insNode, 'w:t');
                 const insertedText = runs.map(r => r.textContent ?? '').join('');
                 if (insertedText) {
+                    // Add to paragraph text so fullText includes accepted insertions
                     text += insertedText;
                     for (const id of activeCommentRanges) {
                         commentAnchorAccum.set(id, (commentAnchorAccum.get(id) ?? '') + insertedText);
                     }
-                    const insNode2 = {
-                        type: 'insertion',
-                        text: insertedText,
-                        metadata: { author, date }
-                    };
-                    children.push(insNode2);
+                    // Emit as a top-level node after the paragraph (side-channel, not a child)
+                    if (!isNoteContext) {
+                        pendingTrackedChanges.push({
+                            type: 'insertion',
+                            text: insertedText,
+                            metadata: { author, date }
+                        });
+                    }
                 }
             }
             else if (node.nodeName === 'w:del' && !config.ignoreTrackedChanges) {
@@ -478,13 +485,12 @@ const parseWord = async (buffer, config) => {
                 // Deleted text uses w:delText, not w:t
                 const runs = (0, xmlUtils_1.getElementsByTagName)(delNode, 'w:delText');
                 const deletedText = runs.map(r => r.textContent ?? '').join('');
-                if (deletedText) {
-                    const delContentNode = {
+                if (deletedText && !isNoteContext) {
+                    pendingTrackedChanges.push({
                         type: 'deletion',
                         text: deletedText,
                         metadata: { author, date }
-                    };
-                    children.push(delContentNode);
+                    });
                 }
             }
             else if (node.nodeName === 'w:r') {
@@ -864,6 +870,11 @@ const parseWord = async (buffer, config) => {
             for (const child of bodyChildren) {
                 if (child.nodeName === 'w:p') {
                     content.push(parseParagraph(child));
+                    // Emit tracked-change nodes collected during paragraph parsing
+                    if (!config.ignoreTrackedChanges && pendingTrackedChanges.length > 0) {
+                        content.push(...pendingTrackedChanges);
+                        pendingTrackedChanges = [];
+                    }
                     // Emit comment nodes for any comments referenced in this paragraph
                     if (!config.ignoreComments && pendingCommentRefs.length > 0) {
                         for (const commentId of pendingCommentRefs) {
