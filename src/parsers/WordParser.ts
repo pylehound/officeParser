@@ -392,7 +392,7 @@ export const parseWord = async (buffer: Buffer, config: OfficeParserConfig): Pro
             // w14:paraId and w14:paraIdParent use the w14 namespace
             const firstParaId = firstPara?.getAttribute("w14:paraId") ?? undefined;
             const parentParaId = firstPara?.getAttribute("w14:paraIdParent")
-                ?? (firstParaId ? extendedParentMap.get(firstParaId) : undefined);
+                || (firstParaId ? extendedParentMap.get(firstParaId) : undefined);
 
             const text = pNodes
                 .map(p => getElementsByTagName(p, "w:t").map(t => t.textContent ?? '').join(''))

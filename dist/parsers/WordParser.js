@@ -352,7 +352,7 @@ const parseWord = async (buffer, config) => {
             // w14:paraId and w14:paraIdParent use the w14 namespace
             const firstParaId = firstPara?.getAttribute("w14:paraId") ?? undefined;
             const parentParaId = firstPara?.getAttribute("w14:paraIdParent")
-                ?? (firstParaId ? extendedParentMap.get(firstParaId) : undefined);
+                || (firstParaId ? extendedParentMap.get(firstParaId) : undefined);
             const text = pNodes
                 .map(p => (0, xmlUtils_1.getElementsByTagName)(p, "w:t").map(t => t.textContent ?? '').join(''))
                 .filter(t => t)
