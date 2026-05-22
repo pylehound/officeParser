@@ -93,6 +93,7 @@ const parseWord = async (buffer, config) => {
     const relsFileRegex = /word\/_rels\/document[\d+]?.xml\.rels/;
     const stylesFileRegex = /word\/styles[\d+]?.xml/;
     const commentsFileRegex = /word\/comments[\d+]?.xml/;
+    const commentsExtendedFileRegex = /word\/commentsExtended[\d+]?.xml/;
     const xmlSerializer = new xmldom_1.XMLSerializer();
     // Pre-compiled regexes for run-property boolean tags (used in hot path)
     const REGEX_W_B = /<w:b(?:\s+w:val="([^"]+)")?\s*\/?>/;
@@ -185,6 +186,7 @@ const parseWord = async (buffer, config) => {
         !!x.match(relsFileRegex) ||
         !!x.match(stylesFileRegex) ||
         !!x.match(commentsFileRegex) ||
+        !!x.match(commentsExtendedFileRegex) ||
         (!!config.extractAttachments && !!x.match(mediaFileRegex)));
     let corePropsFile;
     let relsFile;
@@ -193,6 +195,7 @@ const parseWord = async (buffer, config) => {
     let footnotesFile;
     let endnotesFile;
     let commentsFile;
+    let commentsExtendedFile;
     for (const f of files) {
         if (f.path.match(corePropsFileRegex))
             corePropsFile = f;
@@ -206,6 +209,8 @@ const parseWord = async (buffer, config) => {
             footnotesFile = f;
         else if (f.path.match(endnotesFileRegex))
             endnotesFile = f;
+        else if (f.path.match(commentsExtendedFileRegex))
+            commentsExtendedFile = f;
         else if (f.path.match(commentsFileRegex))
             commentsFile = f;
     }
@@ -317,6 +322,20 @@ const parseWord = async (buffer, config) => {
         }
     }
     const structuredCommentMap = new Map();
+    // Build paraId -> parentParaId map from commentsExtended.xml as a fallback
+    // for documents where w14:paraIdParent is absent on comment paragraphs
+    const extendedParentMap = new Map();
+    if (commentsExtendedFile && !config.ignoreComments) {
+        const extDoc = (0, xmlUtils_1.parseXmlString)(commentsExtendedFile.content.toString());
+        const commentExNodes = (0, xmlUtils_1.getElementsByTagName)(extDoc, "w15:commentEx");
+        for (const node of commentExNodes) {
+            const paraId = node.getAttribute("w15:paraId");
+            const parentParaId = node.getAttribute("w15:paraIdParent");
+            if (paraId && parentParaId) {
+                extendedParentMap.set(paraId, parentParaId);
+            }
+        }
+    }
     if (commentsFile && !config.ignoreComments) {
         const commentsDoc = (0, xmlUtils_1.parseXmlString)(commentsFile.content.toString());
         const commentNodes = (0, xmlUtils_1.getElementsByTagName)(commentsDoc, "w:comment");
@@ -332,7 +351,8 @@ const parseWord = async (buffer, config) => {
             const firstPara = pNodes[0];
             // w14:paraId and w14:paraIdParent use the w14 namespace
             const firstParaId = firstPara?.getAttribute("w14:paraId") ?? undefined;
-            const parentParaId = firstPara?.getAttribute("w14:paraIdParent") ?? undefined;
+            const parentParaId = firstPara?.getAttribute("w14:paraIdParent")
+                ?? (firstParaId ? extendedParentMap.get(firstParaId) : undefined);
             const text = pNodes
                 .map(p => (0, xmlUtils_1.getElementsByTagName)(p, "w:t").map(t => t.textContent ?? '').join(''))
                 .filter(t => t)

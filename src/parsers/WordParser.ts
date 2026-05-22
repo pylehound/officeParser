@@ -93,6 +93,7 @@ export const parseWord = async (buffer: Buffer, config: OfficeParserConfig): Pro
     const relsFileRegex = /word\/_rels\/document[\d+]?.xml\.rels/;
     const stylesFileRegex = /word\/styles[\d+]?.xml/;
     const commentsFileRegex = /word\/comments[\d+]?.xml/;
+    const commentsExtendedFileRegex = /word\/commentsExtended[\d+]?.xml/;
 
     const xmlSerializer = new XMLSerializer();
 
@@ -189,6 +190,7 @@ export const parseWord = async (buffer: Buffer, config: OfficeParserConfig): Pro
         !!x.match(relsFileRegex) ||
         !!x.match(stylesFileRegex) ||
         !!x.match(commentsFileRegex) ||
+        !!x.match(commentsExtendedFileRegex) ||
         (!!config.extractAttachments && !!x.match(mediaFileRegex))
     );
 
@@ -200,6 +202,7 @@ export const parseWord = async (buffer: Buffer, config: OfficeParserConfig): Pro
     let footnotesFile: FileEntry | undefined;
     let endnotesFile: FileEntry | undefined;
     let commentsFile: FileEntry | undefined;
+    let commentsExtendedFile: FileEntry | undefined;
     for (const f of files) {
         if (f.path.match(corePropsFileRegex)) corePropsFile = f;
         else if (f.path.match(relsFileRegex)) relsFile = f;
@@ -207,6 +210,7 @@ export const parseWord = async (buffer: Buffer, config: OfficeParserConfig): Pro
         else if (f.path.match(stylesFileRegex)) stylesFile = f;
         else if (f.path.match(footnotesFileRegex)) footnotesFile = f;
         else if (f.path.match(endnotesFileRegex)) endnotesFile = f;
+        else if (f.path.match(commentsExtendedFileRegex)) commentsExtendedFile = f;
         else if (f.path.match(commentsFileRegex)) commentsFile = f;
     }
 
@@ -345,6 +349,21 @@ export const parseWord = async (buffer: Buffer, config: OfficeParserConfig): Pro
     }
     const structuredCommentMap = new Map<string, StructuredComment>();
 
+    // Build paraId -> parentParaId map from commentsExtended.xml as a fallback
+    // for documents where w14:paraIdParent is absent on comment paragraphs
+    const extendedParentMap = new Map<string, string>();
+    if (commentsExtendedFile && !config.ignoreComments) {
+        const extDoc = parseXmlString(commentsExtendedFile.content.toString());
+        const commentExNodes = getElementsByTagName(extDoc, "w15:commentEx");
+        for (const node of commentExNodes) {
+            const paraId = node.getAttribute("w15:paraId");
+            const parentParaId = node.getAttribute("w15:paraIdParent");
+            if (paraId && parentParaId) {
+                extendedParentMap.set(paraId, parentParaId);
+            }
+        }
+    }
+
     if (commentsFile && !config.ignoreComments) {
         const commentsDoc = parseXmlString(commentsFile.content.toString());
         const commentNodes = getElementsByTagName(commentsDoc, "w:comment");
@@ -372,7 +391,8 @@ export const parseWord = async (buffer: Buffer, config: OfficeParserConfig): Pro
 
             // w14:paraId and w14:paraIdParent use the w14 namespace
             const firstParaId = firstPara?.getAttribute("w14:paraId") ?? undefined;
-            const parentParaId = firstPara?.getAttribute("w14:paraIdParent") ?? undefined;
+            const parentParaId = firstPara?.getAttribute("w14:paraIdParent")
+                ?? (firstParaId ? extendedParentMap.get(firstParaId) : undefined);
 
             const text = pNodes
                 .map(p => getElementsByTagName(p, "w:t").map(t => t.textContent ?? '').join(''))
