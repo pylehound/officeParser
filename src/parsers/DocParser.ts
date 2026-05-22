@@ -77,8 +77,10 @@ function parseAnnotationMetadata(buffer: Buffer, annotationsText: string): Annot
             const cpStart  = tblBuf.readUInt32LE(fcPlcfandTxt + i * 4);
             const cpEnd    = tblBuf.readUInt32LE(fcPlcfandTxt + (i + 1) * 4);
             const relStart = cpStart - ccpText;
-            const relEnd   = cpEnd - ccpText;
-            if (relStart < 0 || relEnd > annotationsText.length || relStart >= relEnd) return null;
+            // word-extractor may strip the trailing \r of the last annotation,
+            // so clamp rather than reject when relEnd slightly overshoots.
+            const relEnd   = Math.min(cpEnd - ccpText, annotationsText.length);
+            if (relStart < 0 || relStart >= relEnd) return null;
 
             const text = annotationsText.substring(relStart, relEnd).replace(/\r+$/, '').trim();
             const ibst  = tblBuf.readUInt16LE(atrdStart + i * 20 + 10);
