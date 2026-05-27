@@ -118,6 +118,69 @@ const EMPTY_COMMENTS_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes
 <w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>`;
 
 // ---------------------------------------------------------------------------
+// Fixture: comment anchored to text inside a table cell
+// ---------------------------------------------------------------------------
+
+const TABLE_COMMENT_DOCUMENT_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml">
+  <w:body>
+    <w:tbl>
+      <w:tr>
+        <w:tc>
+          <w:p>
+            <w:commentRangeStart w:id="5"/>
+            <w:r><w:t>Cell text</w:t></w:r>
+            <w:commentRangeEnd w:id="5"/>
+            <w:r><w:commentReference w:id="5"/></w:r>
+          </w:p>
+        </w:tc>
+      </w:tr>
+    </w:tbl>
+  </w:body>
+</w:document>`;
+
+const TABLE_COMMENT_COMMENTS_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml">
+  <w:comment w:id="5" w:author="Alice" w:date="2026-01-20T10:00:00Z">
+    <w:p w14:paraId="bbcc0005">
+      <w:r><w:t>Verify this cell value.</w:t></w:r>
+    </w:p>
+  </w:comment>
+</w:comments>`;
+
+// ---------------------------------------------------------------------------
+// Fixture: comment range spanning two paragraphs
+// ---------------------------------------------------------------------------
+
+const MULTI_PARA_DOCUMENT_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml">
+  <w:body>
+    <w:p>
+      <w:commentRangeStart w:id="6"/>
+      <w:r><w:t>First paragraph text.</w:t></w:r>
+    </w:p>
+    <w:p>
+      <w:r><w:t xml:space="preserve">Second paragraph text.</w:t></w:r>
+      <w:commentRangeEnd w:id="6"/>
+      <w:r><w:commentReference w:id="6"/></w:r>
+    </w:p>
+  </w:body>
+</w:document>`;
+
+const MULTI_PARA_COMMENTS_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml">
+  <w:comment w:id="6" w:author="Bob" w:date="2026-01-21T10:00:00Z">
+    <w:p w14:paraId="bbcc0006">
+      <w:r><w:t>Spans two paragraphs.</w:t></w:r>
+    </w:p>
+  </w:comment>
+</w:comments>`;
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -205,6 +268,35 @@ async function runTests(): Promise<void> {
         const ast = await OfficeParser.parseOffice(buf);
         assert.ok(ast.fullText?.includes('unconditionally'), 'inserted text in fullText');
         assert.ok(!ast.fullText?.includes('to pay all costs'), 'deleted text not in fullText');
+    });
+
+    await test('emits comment anchored inside a table cell', async () => {
+        const buf = await buildDocx(TABLE_COMMENT_DOCUMENT_XML, TABLE_COMMENT_COMMENTS_XML);
+        const ast = await OfficeParser.parseOffice(buf);
+        const comments = (ast.blocks ?? []).filter(b => b.type === 'comment') as CommentBlock[];
+
+        assert.strictEqual(comments.length, 1, 'comment inside table cell must not be silently dropped');
+        assert.strictEqual(comments[0].text, 'Verify this cell value.');
+        assert.strictEqual(comments[0].author, 'Alice');
+        assert.strictEqual(comments[0].anchorText, 'Cell text');
+    });
+
+    await test('accumulates anchor text across paragraph boundary', async () => {
+        const buf = await buildDocx(MULTI_PARA_DOCUMENT_XML, MULTI_PARA_COMMENTS_XML);
+        const ast = await OfficeParser.parseOffice(buf);
+        const comments = (ast.blocks ?? []).filter(b => b.type === 'comment') as CommentBlock[];
+
+        assert.strictEqual(comments.length, 1, 'multi-paragraph comment must be emitted');
+        assert.strictEqual(comments[0].text, 'Spans two paragraphs.');
+        assert.strictEqual(comments[0].author, 'Bob');
+        assert.ok(
+            comments[0].anchorText?.includes('First paragraph text'),
+            `anchorText should include first paragraph; got: ${comments[0].anchorText}`
+        );
+        assert.ok(
+            comments[0].anchorText?.includes('Second paragraph text'),
+            `anchorText should include second paragraph; got: ${comments[0].anchorText}`
+        );
     });
 
     console.log(`\n${passed} passed, ${failed} failed\n`);

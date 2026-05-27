@@ -6,13 +6,13 @@
  * Uses `cfb` to parse ATRD + GrpXstAtnOwners + PlcfandTxt for per-annotation author info.
  *
  * Limitations vs. DOCX:
- * - Comment anchor text and reply threading are not available.
- * - Dates are not available for Word 97 (nFib=0xC1); Word 2002+ required for ATRDPOST10.
+ * - Comment anchor text, reply threading, and per-comment dates are not available.
  * - Tracked changes (insertions/deletions) are not exposed by word-extractor.
  */
 
 import CFB from 'cfb';
 import { Block, CommentBlock, OfficeParserAST, OfficeParserConfig, TextBlock } from '../types';
+import { logWarning } from '../utils/errorUtils';
 
 interface AnnotationInfo {
     author: string | undefined;
@@ -29,11 +29,13 @@ function parseXstOwners(buf: Buffer, offset: number, lcb: number): string[] {
         if (cch === 0 || off + cch * 2 > end) break;
         authors.push(buf.slice(off, off + cch * 2).toString('ucs2'));
         off += cch * 2;
+        // XstZ format: each string is followed by a 2-byte null terminator
+        if (off + 2 <= end && buf.readUInt16LE(off) === 0) off += 2;
     }
     return authors;
 }
 
-function parseAnnotationMetadata(buffer: Buffer, annotationsText: string): AnnotationInfo[] | null {
+function parseAnnotationMetadata(buffer: Buffer, annotationsText: string, config: OfficeParserConfig): AnnotationInfo[] | null {
     try {
         const cfb = CFB.read(buffer, { type: 'buffer' });
         const wdEntry = CFB.find(cfb, 'WordDocument');
@@ -71,6 +73,7 @@ function parseAnnotationMetadata(buffer: Buffer, annotationsText: string): Annot
             : [];
 
         const atrdStart = fcPlcfandRef + (nAtn + 1) * 4;
+        if (atrdStart + nAtn * 20 > tblBuf.length) return null;
         const result: AnnotationInfo[] = [];
 
         for (let i = 0; i < nAtn; i++) {
@@ -89,7 +92,8 @@ function parseAnnotationMetadata(buffer: Buffer, annotationsText: string): Annot
         }
 
         return result;
-    } catch {
+    } catch (error) {
+        logWarning('Failed to parse .doc annotation metadata:', config, error);
         return null;
     }
 }
@@ -112,7 +116,7 @@ export const parseDoc = async (buffer: Buffer, config: OfficeParserConfig): Prom
     }
 
     if (annotationsText.trim()) {
-        const perAnnotation = parseAnnotationMetadata(buffer, annotationsText);
+        const perAnnotation = parseAnnotationMetadata(buffer, annotationsText, config);
         if (perAnnotation) {
             for (const { author, text } of perAnnotation) {
                 if (text) {
