@@ -6,8 +6,7 @@
  * Uses `cfb` to parse ATRD + GrpXstAtnOwners + PlcfandTxt for per-annotation author info.
  *
  * Limitations vs. DOCX:
- * - Comment anchor text and reply threading are not available.
- * - Dates are not available for Word 97 (nFib=0xC1); Word 2002+ required for ATRDPOST10.
+ * - Comment anchor text, reply threading, and per-comment dates are not available.
  * - Tracked changes (insertions/deletions) are not exposed by word-extractor.
  */
 /// <reference types="node" />

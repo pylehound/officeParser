@@ -394,6 +394,8 @@ const parseWord = async (buffer, config) => {
     let pendingTrackedChanges = [];
     // Anchor text accumulated between commentRangeStart and commentRangeEnd
     const commentAnchorAccum = new Map();
+    // Open comment ranges that span paragraph boundaries (keyed by comment ID)
+    const activeCommentRanges = new Set();
     const content = [];
     const rawContents = [];
     const numberingState = {};
@@ -453,8 +455,6 @@ const parseWord = async (buffer, config) => {
         // Extract text and children
         let text = '';
         const children = [];
-        // Track open comment ranges for anchor text accumulation (keyed by comment ID)
-        const activeCommentRanges = new Set();
         // Collect comment references and tracked changes encountered in this paragraph
         // (only if not in a note context, to avoid emitting extra nodes inside footnotes)
         if (!isNoteContext) {
@@ -483,8 +483,6 @@ const parseWord = async (buffer, config) => {
                 const runs = (0, xmlUtils_1.getElementsByTagName)(insNode, 'w:t');
                 const insertedText = runs.map(r => r.textContent ?? '').join('');
                 if (insertedText) {
-                    // Add to paragraph text so fullText includes accepted insertions
-                    text += insertedText;
                     for (const id of activeCommentRanges) {
                         commentAnchorAccum.set(id, (commentAnchorAccum.get(id) ?? '') + insertedText);
                     }
@@ -780,9 +778,37 @@ const parseWord = async (buffer, config) => {
             return paraNode;
         }
     };
+    // Drain pending comment refs and tracked-change nodes into a flat list and reset both arrays.
+    // Called after every parseParagraph and parseTable invocation that may have populated them.
+    const flushPendings = () => {
+        const flushed = [];
+        if (!config.ignoreTrackedChanges && pendingTrackedChanges.length > 0) {
+            flushed.push(...pendingTrackedChanges);
+            pendingTrackedChanges = [];
+        }
+        if (!config.ignoreComments && pendingCommentRefs.length > 0) {
+            for (const commentId of pendingCommentRefs) {
+                const comment = structuredCommentMap.get(commentId);
+                if (comment) {
+                    const anchorText = commentAnchorAccum.get(commentId);
+                    commentAnchorAccum.delete(commentId);
+                    const commentMeta = {
+                        author: comment.author,
+                        date: comment.date,
+                        anchorText: anchorText ?? undefined,
+                        replies: comment.replies.length > 0 ? comment.replies : undefined
+                    };
+                    flushed.push({ type: 'comment', text: comment.text, metadata: commentMeta });
+                }
+            }
+            pendingCommentRefs = [];
+        }
+        return flushed;
+    };
     // Helper to parse a table node
     const parseTable = (tblNode) => {
         const rows = [];
+        const sidePending = [];
         // Only get direct child rows, not nested table rows
         const trNodes = (0, xmlUtils_1.getDirectChildren)(tblNode, "w:tr");
         for (let rIndex = 0; rIndex < trNodes.length; rIndex++) {
@@ -801,11 +827,14 @@ const parseWord = async (buffer, config) => {
                         const pNode = parseParagraph(child);
                         cellChildren.push(pNode);
                         cellText += pNode.text;
+                        // Flush any comments/tracked-changes from this cell paragraph
+                        sidePending.push(...flushPendings());
                     }
                     else if (child.nodeName === 'w:tbl') {
-                        // Nested table
-                        const nestedTable = parseTable(child);
-                        cellChildren.push(nestedTable);
+                        // Nested table — cascade its side-pending nodes up to ours
+                        const nested = parseTable(child);
+                        cellChildren.push(nested.node);
+                        sidePending.push(...nested.sidePending);
                         // Don't add nested table text to cell text - it will be handled recursively
                     }
                 }
@@ -835,8 +864,8 @@ const parseWord = async (buffer, config) => {
             rows.push(rowNode);
         }
         return {
-            type: 'table',
-            children: rows
+            node: { type: 'table', children: rows },
+            sidePending
         };
     };
     // Pre-process footnotes and endnotes to be inserted inline later
@@ -890,36 +919,11 @@ const parseWord = async (buffer, config) => {
             for (const child of bodyChildren) {
                 if (child.nodeName === 'w:p') {
                     content.push(parseParagraph(child));
-                    // Emit tracked-change nodes collected during paragraph parsing
-                    if (!config.ignoreTrackedChanges && pendingTrackedChanges.length > 0) {
-                        content.push(...pendingTrackedChanges);
-                        pendingTrackedChanges = [];
-                    }
-                    // Emit comment nodes for any comments referenced in this paragraph
-                    if (!config.ignoreComments && pendingCommentRefs.length > 0) {
-                        for (const commentId of pendingCommentRefs) {
-                            const comment = structuredCommentMap.get(commentId);
-                            if (comment) {
-                                const anchorText = commentAnchorAccum.get(commentId);
-                                commentAnchorAccum.delete(commentId);
-                                const commentMeta = {
-                                    author: comment.author,
-                                    date: comment.date,
-                                    anchorText: anchorText ?? undefined,
-                                    replies: comment.replies.length > 0 ? comment.replies : undefined
-                                };
-                                content.push({
-                                    type: 'comment',
-                                    text: comment.text,
-                                    metadata: commentMeta
-                                });
-                            }
-                        }
-                        pendingCommentRefs = [];
-                    }
+                    content.push(...flushPendings());
                 }
                 else if (child.nodeName === 'w:tbl') {
-                    content.push(parseTable(child));
+                    const { node, sidePending } = parseTable(child);
+                    content.push(node, ...sidePending);
                 }
             }
         }

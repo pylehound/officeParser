@@ -7,8 +7,7 @@
  * Uses `cfb` to parse ATRD + GrpXstAtnOwners + PlcfandTxt for per-annotation author info.
  *
  * Limitations vs. DOCX:
- * - Comment anchor text and reply threading are not available.
- * - Dates are not available for Word 97 (nFib=0xC1); Word 2002+ required for ATRDPOST10.
+ * - Comment anchor text, reply threading, and per-comment dates are not available.
  * - Tracked changes (insertions/deletions) are not exposed by word-extractor.
  */
 var __importDefault = (this && this.__importDefault) || function (mod) {
@@ -17,6 +16,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.parseDoc = void 0;
 const cfb_1 = __importDefault(require("cfb"));
+const errorUtils_1 = require("../utils/errorUtils");
 function parseXstOwners(buf, offset, lcb) {
     const authors = [];
     let off = offset;
@@ -28,10 +28,13 @@ function parseXstOwners(buf, offset, lcb) {
             break;
         authors.push(buf.slice(off, off + cch * 2).toString('ucs2'));
         off += cch * 2;
+        // XstZ format: each string is followed by a 2-byte null terminator
+        if (off + 2 <= end && buf.readUInt16LE(off) === 0)
+            off += 2;
     }
     return authors;
 }
-function parseAnnotationMetadata(buffer, annotationsText) {
+function parseAnnotationMetadata(buffer, annotationsText, config) {
     try {
         const cfb = cfb_1.default.read(buffer, { type: 'buffer' });
         const wdEntry = cfb_1.default.find(cfb, 'WordDocument');
@@ -69,6 +72,8 @@ function parseAnnotationMetadata(buffer, annotationsText) {
             ? parseXstOwners(tblBuf, fcGrpOwners, lcbGrpOwners)
             : [];
         const atrdStart = fcPlcfandRef + (nAtn + 1) * 4;
+        if (atrdStart + nAtn * 20 > tblBuf.length)
+            return null;
         const result = [];
         for (let i = 0; i < nAtn; i++) {
             const cpStart = tblBuf.readUInt32LE(fcPlcfandTxt + i * 4);
@@ -86,7 +91,8 @@ function parseAnnotationMetadata(buffer, annotationsText) {
         }
         return result;
     }
-    catch {
+    catch (error) {
+        (0, errorUtils_1.logWarning)('Failed to parse .doc annotation metadata:', config, error);
         return null;
     }
 }
@@ -104,7 +110,7 @@ const parseDoc = async (buffer, config) => {
         blocks.push(textBlock);
     }
     if (annotationsText.trim()) {
-        const perAnnotation = parseAnnotationMetadata(buffer, annotationsText);
+        const perAnnotation = parseAnnotationMetadata(buffer, annotationsText, config);
         if (perAnnotation) {
             for (const { author, text } of perAnnotation) {
                 if (text) {
