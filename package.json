@@ -69,6 +69,7 @@
   "homepage": "https://harshankur.github.io/officeParser/",
   "dependencies": {
     "@xmldom/xmldom": "^0.8.10",
+    "cfb": "^1.2.2",
     "concat-stream": "^2.0.0",
     "file-type": "^16.5.4",
     "pdfjs-dist": "5.4.530",
