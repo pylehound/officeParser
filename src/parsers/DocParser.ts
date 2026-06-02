@@ -87,7 +87,7 @@ function parseAnnotationMetadata(buffer: Buffer, annotationsText: string, config
 
             const text = annotationsText.substring(relStart, relEnd).replace(/\r+$/, '').trim();
             const ibst  = tblBuf.readUInt16LE(atrdStart + i * 20 + 10);
-            const author = authors[ibst];
+            const author = ibst < authors.length ? authors[ibst] : undefined;
             result.push({ author, text });
         }
 

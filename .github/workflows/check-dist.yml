@@ -1,0 +1,32 @@
+name: Check dist is not stale
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  check-dist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Rebuild dist
+        run: npm run build:node
+
+      - name: Fail if dist differs from committed version
+        run: |
+          if ! git diff --exit-code dist/; then
+            echo ""
+            echo "ERROR: committed dist/ is stale. Run 'npm run build:node' and commit the result."
+            exit 1
+          fi

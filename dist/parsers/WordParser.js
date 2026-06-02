@@ -337,6 +337,8 @@ const parseWord = async (buffer, config) => {
     const extendedParentMap = new Map();
     if (commentsExtendedFile && !config.ignoreComments) {
         const extDoc = (0, xmlUtils_1.parseXmlString)(commentsExtendedFile.content.toString());
+        // getElementsByTagName matches on the serialised prefix literal, not namespace URI.
+        // Documents that bind the same namespace to a different prefix would be missed here.
         const commentExNodes = (0, xmlUtils_1.getElementsByTagName)(extDoc, "w15:commentEx");
         for (const node of commentExNodes) {
             const paraId = node.getAttribute("w15:paraId");
@@ -411,7 +413,7 @@ const parseWord = async (buffer, config) => {
     const numberingState = {};
     const listCounters = {}; // Track item index per listId/level
     // Helper to parse a paragraph node
-    const parseParagraph = (pNode, isNoteContext = false) => {
+    const parseParagraph = (pNode, isNoteContext = false, skipReset = false) => {
         const pXml = xmlSerializer.serializeToString(pNode);
         // Check if it's a list item
         const numPr = (0, xmlUtils_1.getElementsByTagName)(pNode, "w:numPr")[0];
@@ -465,9 +467,10 @@ const parseWord = async (buffer, config) => {
         // Extract text and children
         let text = '';
         const children = [];
-        // Collect comment references and tracked changes encountered in this paragraph
-        // (only if not in a note context, to avoid emitting extra nodes inside footnotes)
-        if (!isNoteContext) {
+        // Reset pending state for a fresh top-level paragraph. Skip the reset when recursing
+        // into text-box content (skipReset=true) so refs collected before the text-box run are
+        // preserved, and skip for note contexts (isNoteContext=true) which have their own domain.
+        if (!isNoteContext && !skipReset) {
             pendingCommentRefs = [];
             pendingTrackedChanges = [];
         }
@@ -643,11 +646,13 @@ const parseWord = async (buffer, config) => {
                     }
                 }
                 // Text boxes (modern: wps:txbx, legacy: v:textbox)
+                // Text boxes: skipReset=true so refs/changes from before this run survive;
+                // isNoteContext=false so comment refs and tracked changes are collected normally.
                 const txbxContents = (0, xmlUtils_1.getElementsByTagName)(runNode, "w:txbxContent");
                 for (const txbx of txbxContents) {
                     const pNodes = (0, xmlUtils_1.getElementsByTagName)(txbx, "w:p");
                     for (const p of pNodes) {
-                        const parsed = parseParagraph(p, true);
+                        const parsed = parseParagraph(p, false, true);
                         if (parsed.text?.trim())
                             children.push(parsed);
                     }

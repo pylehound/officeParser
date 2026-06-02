@@ -362,6 +362,8 @@ export const parseWord = async (buffer: Buffer, config: OfficeParserConfig): Pro
     const extendedParentMap = new Map<string, string>();
     if (commentsExtendedFile && !config.ignoreComments) {
         const extDoc = parseXmlString(commentsExtendedFile.content.toString());
+        // getElementsByTagName matches on the serialised prefix literal, not namespace URI.
+        // Documents that bind the same namespace to a different prefix would be missed here.
         const commentExNodes = getElementsByTagName(extDoc, "w15:commentEx");
         for (const node of commentExNodes) {
             const paraId = node.getAttribute("w15:paraId");
@@ -454,7 +456,7 @@ export const parseWord = async (buffer: Buffer, config: OfficeParserConfig): Pro
     const listCounters: { [key: string]: { [key: string]: number } } = {}; // Track item index per listId/level
 
     // Helper to parse a paragraph node
-    const parseParagraph = (pNode: Element, isNoteContext = false): OfficeContentNode => {
+    const parseParagraph = (pNode: Element, isNoteContext = false, skipReset = false): OfficeContentNode => {
         const pXml = xmlSerializer.serializeToString(pNode);
 
         // Check if it's a list item
@@ -515,9 +517,10 @@ export const parseWord = async (buffer: Buffer, config: OfficeParserConfig): Pro
         let text = '';
         const children: OfficeContentNode[] = [];
 
-        // Collect comment references and tracked changes encountered in this paragraph
-        // (only if not in a note context, to avoid emitting extra nodes inside footnotes)
-        if (!isNoteContext) {
+        // Reset pending state for a fresh top-level paragraph. Skip the reset when recursing
+        // into text-box content (skipReset=true) so refs collected before the text-box run are
+        // preserved, and skip for note contexts (isNoteContext=true) which have their own domain.
+        if (!isNoteContext && !skipReset) {
             pendingCommentRefs = [];
             pendingTrackedChanges = [];
         }
@@ -697,11 +700,13 @@ export const parseWord = async (buffer: Buffer, config: OfficeParserConfig): Pro
                 }
 
                 // Text boxes (modern: wps:txbx, legacy: v:textbox)
+                // Text boxes: skipReset=true so refs/changes from before this run survive;
+                // isNoteContext=false so comment refs and tracked changes are collected normally.
                 const txbxContents = getElementsByTagName(runNode, "w:txbxContent");
                 for (const txbx of txbxContents) {
                     const pNodes = getElementsByTagName(txbx, "w:p");
                     for (const p of pNodes) {
-                        const parsed = parseParagraph(p as Element, true);
+                        const parsed = parseParagraph(p as Element, false, true);
                         if (parsed.text?.trim()) children.push(parsed);
                     }
                 }
