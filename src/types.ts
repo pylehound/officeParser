@@ -78,7 +78,7 @@ export type SupportedFileType = 'docx' | 'doc' | 'pptx' | 'xlsx' | 'odt' | 'odp'
 /**
  * Types of content nodes in the AST.
  */
-export type OfficeContentNodeType = 'paragraph' | 'heading' | 'table' | 'list' | 'text' | 'image' | 'chart' | 'drawing' | 'slide' | 'note' | 'sheet' | 'row' | 'cell' | 'page' | 'comment' | 'insertion' | 'deletion';
+export type OfficeContentNodeType = 'paragraph' | 'heading' | 'table' | 'list' | 'text' | 'image' | 'chart' | 'drawing' | 'slide' | 'note' | 'sheet' | 'row' | 'cell' | 'page' | 'comment' | 'insertion' | 'deletion' | 'header' | 'footer';
 
 /**
  * Supported MIME types for attachments.
@@ -662,9 +662,29 @@ export interface DeletionBlock {
 }
 
 /**
+ * Header block extracted from a Word document's header files (word/header*.xml).
+ * Deduplicated by text content across all header files in the document.
+ */
+export interface HeaderBlock {
+    type: 'header';
+    /** Plain text content of the header. */
+    text: string;
+}
+
+/**
+ * Footer block extracted from a Word document's footer files (word/footer*.xml).
+ * Deduplicated by text content across all footer files in the document.
+ */
+export interface FooterBlock {
+    type: 'footer';
+    /** Plain text content of the footer. */
+    text: string;
+}
+
+/**
  * Union type of all block types.
  */
-export type Block = TextBlock | ImageBlock | TableBlock | ChartBlock | CommentBlock | InsertionBlock | DeletionBlock;
+export type Block = TextBlock | ImageBlock | TableBlock | ChartBlock | CommentBlock | InsertionBlock | DeletionBlock | HeaderBlock | FooterBlock;
 
 /**
  * Represents an attachment extracted from the document (image, chart, etc.).

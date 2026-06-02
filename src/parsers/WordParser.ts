@@ -60,7 +60,7 @@
  */
 
 import { XMLSerializer } from '@xmldom/xmldom';
-import { Block, ChartBlock, ChartMetadata, CommentBlock, CommentMetadata, CommentReply, DeletionBlock, ImageBlock, ImageMetadata, InsertionBlock, ListMetadata, OfficeAttachment, OfficeContentNode, OfficeParserAST, OfficeParserConfig, TableBlock, TextBlock, TextFormatting, TextMetadata, TrackedChangeMetadata } from '../types';
+import { Block, ChartBlock, ChartMetadata, CommentBlock, CommentMetadata, CommentReply, DeletionBlock, FooterBlock, HeaderBlock, ImageBlock, ImageMetadata, InsertionBlock, ListMetadata, OfficeAttachment, OfficeContentNode, OfficeParserAST, OfficeParserConfig, TableBlock, TextBlock, TextFormatting, TextMetadata, TrackedChangeMetadata } from '../types';
 import { logWarning } from '../utils/errorUtils';
 import { createAttachment } from '../utils/imageUtils';
 import { performOcr } from '../utils/ocrUtils';
@@ -94,6 +94,8 @@ export const parseWord = async (buffer: Buffer, config: OfficeParserConfig): Pro
     const stylesFileRegex = /word\/styles[\d+]?.xml/;
     const commentsFileRegex = /word\/comments[\d+]?.xml/;
     const commentsExtendedFileRegex = /word\/commentsExtended[\d+]?.xml/;
+    const headerFileRegex = /word\/header[\d+]?.xml/;
+    const footerFileRegex = /word\/footer[\d+]?.xml/;
 
     const xmlSerializer = new XMLSerializer();
 
@@ -191,6 +193,8 @@ export const parseWord = async (buffer: Buffer, config: OfficeParserConfig): Pro
         !!x.match(stylesFileRegex) ||
         !!x.match(commentsFileRegex) ||
         !!x.match(commentsExtendedFileRegex) ||
+        !!x.match(headerFileRegex) ||
+        !!x.match(footerFileRegex) ||
         (!!config.extractAttachments && !!x.match(mediaFileRegex))
     );
 
@@ -203,6 +207,8 @@ export const parseWord = async (buffer: Buffer, config: OfficeParserConfig): Pro
     let endnotesFile: FileEntry | undefined;
     let commentsFile: FileEntry | undefined;
     let commentsExtendedFile: FileEntry | undefined;
+    const headerFiles: FileEntry[] = [];
+    const footerFiles: FileEntry[] = [];
     for (const f of files) {
         if (f.path.match(corePropsFileRegex)) corePropsFile = f;
         else if (f.path.match(relsFileRegex)) relsFile = f;
@@ -212,6 +218,8 @@ export const parseWord = async (buffer: Buffer, config: OfficeParserConfig): Pro
         else if (f.path.match(endnotesFileRegex)) endnotesFile = f;
         else if (f.path.match(commentsExtendedFileRegex)) commentsExtendedFile = f;
         else if (f.path.match(commentsFileRegex)) commentsFile = f;
+        else if (f.path.match(headerFileRegex)) headerFiles.push(f);
+        else if (f.path.match(footerFileRegex)) footerFiles.push(f);
     }
 
     // Extract metadata
@@ -688,6 +696,16 @@ export const parseWord = async (buffer: Buffer, config: OfficeParserConfig): Pro
                     }
                 }
 
+                // Text boxes (modern: wps:txbx, legacy: v:textbox)
+                const txbxContents = getElementsByTagName(runNode, "w:txbxContent");
+                for (const txbx of txbxContents) {
+                    const pNodes = getElementsByTagName(txbx, "w:p");
+                    for (const p of pNodes) {
+                        const parsed = parseParagraph(p as Element, true);
+                        if (parsed.text?.trim()) children.push(parsed);
+                    }
+                }
+
                 // Footnotes/Endnotes inside runs
                 if (!config.ignoreNotes) {
                     const footnoteRef = getElementsByTagName(runNode, "w:footnoteReference")[0];
@@ -955,6 +973,34 @@ export const parseWord = async (buffer: Buffer, config: OfficeParserConfig): Pro
         }
     }
 
+    // Extract headers and footers, deduplicated by plain text content, before body.
+    const extractPlainText = (el: Element): string =>
+        getElementsByTagName(el, "w:t").map(t => t.textContent || '').join('').trim();
+
+    const seenHeaderTexts = new Set<string>();
+    for (const hFile of headerFiles) {
+        const hDoc = parseXmlString(hFile.content.toString());
+        const hdrEl = getElementsByTagName(hDoc, "w:hdr")[0];
+        if (!hdrEl) continue;
+        const text = extractPlainText(hdrEl as Element);
+        if (text && !seenHeaderTexts.has(text)) {
+            seenHeaderTexts.add(text);
+            content.push({ type: 'header', text } as OfficeContentNode);
+        }
+    }
+
+    const seenFooterTexts = new Set<string>();
+    for (const fFile of footerFiles) {
+        const fDoc = parseXmlString(fFile.content.toString());
+        const ftrEl = getElementsByTagName(fDoc, "w:ftr")[0];
+        if (!ftrEl) continue;
+        const text = extractPlainText(ftrEl as Element);
+        if (text && !seenFooterTexts.has(text)) {
+            seenFooterTexts.add(text);
+            content.push({ type: 'footer', text } as OfficeContentNode);
+        }
+    }
+
     for (const file of files) {
         if (file.path.match(mediaFileRegex)) continue;
         if (file.path.match(numberingFileRegex)) continue;
@@ -963,6 +1009,8 @@ export const parseWord = async (buffer: Buffer, config: OfficeParserConfig): Pro
         if (file.path.match(footnotesFileRegex)) continue;
         if (file.path.match(endnotesFileRegex)) continue;
         if (file.path.match(commentsFileRegex)) continue;
+        if (file.path.match(headerFileRegex)) continue;
+        if (file.path.match(footerFileRegex)) continue;
 
         const documentContent = file.content.toString();
         if (config.includeRawContent) {
@@ -1091,6 +1139,16 @@ export const parseWord = async (buffer: Buffer, config: OfficeParserConfig): Pro
     const blocks: Block[] = [];
 
     const traverseBlocksAndText = (node: OfficeContentNode): string => {
+        if (node.type === 'header') {
+            const headerBlock: HeaderBlock = { type: 'header', text: node.text ?? '' };
+            blocks.push(headerBlock);
+            return '';
+        }
+        if (node.type === 'footer') {
+            const footerBlock: FooterBlock = { type: 'footer', text: node.text ?? '' };
+            blocks.push(footerBlock);
+            return '';
+        }
         if (node.type === 'comment') {
             const meta = node.metadata as CommentMetadata | undefined;
             const commentBlock: CommentBlock = {

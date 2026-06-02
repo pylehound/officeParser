@@ -79,6 +79,8 @@ import {
     CommentBlock,
     InsertionBlock,
     DeletionBlock,
+    HeaderBlock,
+    FooterBlock,
     CommentMetadata,
     TrackedChangeMetadata,
     CommentReply
@@ -121,6 +123,8 @@ export {
     CommentBlock,
     InsertionBlock,
     DeletionBlock,
+    HeaderBlock,
+    FooterBlock,
     CommentMetadata,
     TrackedChangeMetadata,
     CommentReply

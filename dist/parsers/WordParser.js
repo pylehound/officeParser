@@ -94,6 +94,8 @@ const parseWord = async (buffer, config) => {
     const stylesFileRegex = /word\/styles[\d+]?.xml/;
     const commentsFileRegex = /word\/comments[\d+]?.xml/;
     const commentsExtendedFileRegex = /word\/commentsExtended[\d+]?.xml/;
+    const headerFileRegex = /word\/header[\d+]?.xml/;
+    const footerFileRegex = /word\/footer[\d+]?.xml/;
     const xmlSerializer = new xmldom_1.XMLSerializer();
     // Pre-compiled regexes for run-property boolean tags (used in hot path)
     const REGEX_W_B = /<w:b(?:\s+w:val="([^"]+)")?\s*\/?>/;
@@ -187,6 +189,8 @@ const parseWord = async (buffer, config) => {
         !!x.match(stylesFileRegex) ||
         !!x.match(commentsFileRegex) ||
         !!x.match(commentsExtendedFileRegex) ||
+        !!x.match(headerFileRegex) ||
+        !!x.match(footerFileRegex) ||
         (!!config.extractAttachments && !!x.match(mediaFileRegex)));
     let corePropsFile;
     let relsFile;
@@ -196,6 +200,8 @@ const parseWord = async (buffer, config) => {
     let endnotesFile;
     let commentsFile;
     let commentsExtendedFile;
+    const headerFiles = [];
+    const footerFiles = [];
     for (const f of files) {
         if (f.path.match(corePropsFileRegex))
             corePropsFile = f;
@@ -213,6 +219,10 @@ const parseWord = async (buffer, config) => {
             commentsExtendedFile = f;
         else if (f.path.match(commentsFileRegex))
             commentsFile = f;
+        else if (f.path.match(headerFileRegex))
+            headerFiles.push(f);
+        else if (f.path.match(footerFileRegex))
+            footerFiles.push(f);
     }
     // Extract metadata
     const metadata = corePropsFile ? (0, xmlUtils_1.parseOfficeMetadata)(corePropsFile.content.toString()) : {};
@@ -632,6 +642,16 @@ const parseWord = async (buffer, config) => {
                         }
                     }
                 }
+                // Text boxes (modern: wps:txbx, legacy: v:textbox)
+                const txbxContents = (0, xmlUtils_1.getElementsByTagName)(runNode, "w:txbxContent");
+                for (const txbx of txbxContents) {
+                    const pNodes = (0, xmlUtils_1.getElementsByTagName)(txbx, "w:p");
+                    for (const p of pNodes) {
+                        const parsed = parseParagraph(p, true);
+                        if (parsed.text?.trim())
+                            children.push(parsed);
+                    }
+                }
                 // Footnotes/Endnotes inside runs
                 if (!config.ignoreNotes) {
                     const footnoteRef = (0, xmlUtils_1.getElementsByTagName)(runNode, "w:footnoteReference")[0];
@@ -893,6 +913,32 @@ const parseWord = async (buffer, config) => {
             }
         }
     }
+    // Extract headers and footers, deduplicated by plain text content, before body.
+    const extractPlainText = (el) => (0, xmlUtils_1.getElementsByTagName)(el, "w:t").map(t => t.textContent || '').join('').trim();
+    const seenHeaderTexts = new Set();
+    for (const hFile of headerFiles) {
+        const hDoc = (0, xmlUtils_1.parseXmlString)(hFile.content.toString());
+        const hdrEl = (0, xmlUtils_1.getElementsByTagName)(hDoc, "w:hdr")[0];
+        if (!hdrEl)
+            continue;
+        const text = extractPlainText(hdrEl);
+        if (text && !seenHeaderTexts.has(text)) {
+            seenHeaderTexts.add(text);
+            content.push({ type: 'header', text });
+        }
+    }
+    const seenFooterTexts = new Set();
+    for (const fFile of footerFiles) {
+        const fDoc = (0, xmlUtils_1.parseXmlString)(fFile.content.toString());
+        const ftrEl = (0, xmlUtils_1.getElementsByTagName)(fDoc, "w:ftr")[0];
+        if (!ftrEl)
+            continue;
+        const text = extractPlainText(ftrEl);
+        if (text && !seenFooterTexts.has(text)) {
+            seenFooterTexts.add(text);
+            content.push({ type: 'footer', text });
+        }
+    }
     for (const file of files) {
         if (file.path.match(mediaFileRegex))
             continue;
@@ -907,6 +953,10 @@ const parseWord = async (buffer, config) => {
         if (file.path.match(endnotesFileRegex))
             continue;
         if (file.path.match(commentsFileRegex))
+            continue;
+        if (file.path.match(headerFileRegex))
+            continue;
+        if (file.path.match(footerFileRegex))
             continue;
         const documentContent = file.content.toString();
         if (config.includeRawContent) {
@@ -1020,6 +1070,16 @@ const parseWord = async (buffer, config) => {
     const newline = config.newlineDelimiter ?? '\n';
     const blocks = [];
     const traverseBlocksAndText = (node) => {
+        if (node.type === 'header') {
+            const headerBlock = { type: 'header', text: node.text ?? '' };
+            blocks.push(headerBlock);
+            return '';
+        }
+        if (node.type === 'footer') {
+            const footerBlock = { type: 'footer', text: node.text ?? '' };
+            blocks.push(footerBlock);
+            return '';
+        }
         if (node.type === 'comment') {
             const meta = node.metadata;
             const commentBlock = {
